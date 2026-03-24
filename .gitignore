@@ -23,3 +23,9 @@ logs/
 # IDE files
 .vscode/
 .idea/
+
+# Python cache
+__pycache__/
+
+# Unit execution notebooks
+*_unit_execution.ipynb
