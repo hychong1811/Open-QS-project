@@ -29,3 +29,6 @@ __pycache__/
 
 # Unit execution notebooks
 *_unit_execution.ipynb
+
+# CSV files (result)
+*.csv
