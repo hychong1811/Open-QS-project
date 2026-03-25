@@ -32,3 +32,6 @@ __pycache__/
 
 # CSV files (result)
 *.csv
+
+# PNG files (result)
+*.png
