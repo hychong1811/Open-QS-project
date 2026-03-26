@@ -465,6 +465,7 @@ def plot_populations_and_coherence_comparison(
         ax.set_title(title)
     if grid:
         ax.grid(True, alpha=0.3)
-    ax.legend()
+    ax.legend(loc='upper center', bbox_to_anchor=(0.5, -0.05),
+          fancybox=True, shadow=True, ncol=2)
     fig.tight_layout()
     return fig, ax
