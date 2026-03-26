@@ -118,7 +118,7 @@ def plot_coherence_comparison(
             ax=None,
             title=title,
             xlabel=xlabel,
-            color=color,
+            colors=color,
             obtained_marker=obtained_marker,
             obtained_markevery=obtained_markevery,
             obtained_alpha=obtained_alpha,
