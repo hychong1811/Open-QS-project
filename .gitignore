@@ -33,5 +33,5 @@ __pycache__/
 # CSV files (result)
 *.csv
 
-# PNG files (result)
-*.png
+# PDF files (result)
+*.pdf
