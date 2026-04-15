@@ -5,21 +5,12 @@ from typing import Iterable, Optional, Sequence
 
 import numpy as np
 
-try:  # Prefer package-style imports when project root is on sys.path
-    from project.algo.dilation_algo import (  # type: ignore
-        PostselectionResult,
-        build_state_preparation_dilation,
-        density_matrix_from_state,
-        prepare_subnormalized_state_from_uniform_superposition,
-    )
-except Exception:  # pragma: no cover - fallback for direct folder imports
-    from algo.dilation_algo import (  # type: ignore
-        PostselectionResult,
-        build_state_preparation_dilation,
-        density_matrix_from_state,
-        prepare_subnormalized_state_from_uniform_superposition,
-    )
-
+from algo.dilation_algo import (  # type: ignore
+    PostselectionResult,
+    build_state_preparation_dilation,
+    density_matrix_from_state,
+    prepare_subnormalized_state_from_uniform_superposition,
+)
 
 ArrayLike = np.ndarray
 
