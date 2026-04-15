@@ -287,7 +287,8 @@ def plot_complex_coherence_comparison(
     ax.set_ylabel(r"$\rho_{01}(t)$")
     if grid:
         ax.grid(True, alpha=0.3)
-    ax.legend()
+    ax.legend(loc='upper center', bbox_to_anchor=(0.5, -0.05),
+          fancybox=True, shadow=True, ncol=2)
     if title is not None:
         ax.set_title(title)
 

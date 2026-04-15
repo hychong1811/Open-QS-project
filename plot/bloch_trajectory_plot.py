@@ -258,6 +258,7 @@ def plot_bloch_trajectory_comparison(
         cbar = fig.colorbar(sm, ax=ax, pad=0.08, shrink=0.75)
         cbar.set_label("Time")
 
-    ax.legend(loc="upper left")
+    ax.legend(loc='upper center', bbox_to_anchor=(0.5, -0.05),
+          fancybox=True, shadow=True, ncol=2)
     fig.tight_layout()
     return fig, ax
