@@ -2,6 +2,8 @@
 School project (reproduction of papers' result)  
 "Quantum state preparation and nonunitary evolution with diagonal operators"  
 
+See comparison branch for extensions  
+
 algo: construct unitaries for non-unitary operators and SVD  
 metric: do tomography, compute fidelity and frobenius distance  
 noise: simulate possible noise for quantum circuit  
