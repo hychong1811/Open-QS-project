@@ -1,5 +1,6 @@
 # Open-QS-project
-School project
+School project (reproduction and extensions)  
+"Quantum state preparation and nonunitary evolution with diagonal operators"  
 
 algo: construct unitaries for non-unitary operators and SVD; prepare Sz.-Nagy algorithms  
 metric: do tomography, compute fidelity, forbenius distance and success probability    
