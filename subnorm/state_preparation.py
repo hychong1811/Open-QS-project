@@ -5,11 +5,17 @@ from typing import Iterable, Optional, Sequence
 
 import numpy as np
 
-from algo.dilation_algo import (  # type: ignore
+from algo.dilation_algo import (  
     PostselectionResult,
     build_state_preparation_dilation,
     density_matrix_from_state,
     prepare_subnormalized_state_from_uniform_superposition,
+)
+
+from algo.sz_nagy_dilation import (  # type: ignore
+    StatePostselectionResult as SzNagyStatePostselectionResult,
+    build_sz_nagy_dilation,
+    apply_sz_nagy_dilation_to_state,
 )
 
 ArrayLike = np.ndarray
@@ -368,3 +374,180 @@ def build_diagonal_dilation_for_sample(
         auto_scale=auto_scale,
         tol=tol,
     )
+
+@dataclass(frozen=True)
+class SubnormalizedPreparationMethodResult:
+    """Result of preparing one subnormalised state with a chosen method."""
+
+    method: str
+    target_subnormalized_state: ArrayLike
+    exact_density_matrix: ArrayLike
+    success_probability: float
+    normalized_success_state: Optional[ArrayLike]
+    recovered_density_matrix: ArrayLike
+    recovery_error_norm: float
+    scale_factor: float
+    backend_result: Optional[object] = None
+
+
+def _uniform_superposition_for_dim(dim: int) -> ArrayLike:
+    """Return the normalized uniform superposition of length `dim`."""
+    if dim <= 0:
+        raise ValueError("dim must be positive.")
+    return np.ones(dim, dtype=complex) / np.sqrt(dim)
+
+
+def prepare_subnormalized_state_via_method(
+    subnormalized_state: Sequence[complex],
+    *,
+    method: str = "paper_svd",
+    auto_scale: bool = False,
+    tol: float = 1e-12,
+    unitary_baseline_success_value: float = 1.0,
+) -> SubnormalizedPreparationMethodResult:
+    """
+    Prepare one subnormalised state using one of:
+
+    - "paper_svd"
+    - "sz_nagy"
+    - "unitary_rescaled"
+
+    Notes
+    -----
+    For the paper SVD and Sz.-Nagy methods, the input system state is the
+    uniform superposition |~> and the nonunitary operator is
+        Sigma = diag(c_0, c_1, ..., c_{d-1}),
+    where |phi> = sum_j c_j |j>.
+    The ancilla-|0> branch then equals Sigma |~>, so the target density is
+    recovered using the same scaling relation already used elsewhere in
+    this file.
+
+    For the unitary-only rescaled baseline, the normalized target state is
+    prepared directly and the exact subnormalised density is recovered by
+    multiplying by the target trace. There is no postselection, so the
+    success probability is treated as deterministic.
+    """
+    coeffs = _as_complex_vector(subnormalized_state)
+    dim = coeffs.size
+    if dim <= 0:
+        raise ValueError("subnormalized_state must be nonempty.")
+
+    rho_exact = exact_subnormalized_density_matrix(coeffs)
+    trace_val = float(np.real(np.trace(rho_exact)))
+    if trace_val < -tol:
+        raise ValueError("Encountered a negative trace beyond tolerance.")
+
+    method_key = str(method).strip().lower()
+
+    # ------------------------------------------------------------------
+    # Paper SVD dilation
+    # ------------------------------------------------------------------
+    if method_key in {"paper_svd", "paper", "svd"}:
+        result = prepare_subnormalized_state_from_uniform_superposition(
+            coeffs,
+            auto_scale=auto_scale,
+            tol=tol,
+        )
+        recovered = recover_target_density_from_success_branch(
+            result.ancilla_zero_branch,
+            num_system_qubits=int(np.log2(dim)),
+        )
+        err = float(np.linalg.norm(recovered - rho_exact, ord="fro"))
+        return SubnormalizedPreparationMethodResult(
+            method="paper_svd",
+            target_subnormalized_state=coeffs,
+            exact_density_matrix=rho_exact,
+            success_probability=float(result.p_success),
+            normalized_success_state=result.normalized_success_state,
+            recovered_density_matrix=recovered,
+            recovery_error_norm=err,
+            scale_factor=float(result.scale_factor),
+            backend_result=result,
+        )
+
+    # ------------------------------------------------------------------
+    # Direct Sz.-Nagy dilation
+    # ------------------------------------------------------------------
+    if method_key in {"sz_nagy", "sz-nagy", "sznagy"}:
+        sigma = state_preparation_diagonal_operator(coeffs)
+        dilation = build_sz_nagy_dilation(
+            sigma,
+            auto_scale=auto_scale,
+            tol=tol,
+        )
+        input_state = _uniform_superposition_for_dim(dim)
+        result = apply_sz_nagy_dilation_to_state(dilation, input_state)
+        recovered = recover_target_density_from_success_branch(
+            result.ancilla_zero_branch,
+            num_system_qubits=int(np.log2(dim)),
+        )
+        err = float(np.linalg.norm(recovered - rho_exact, ord="fro"))
+        return SubnormalizedPreparationMethodResult(
+            method="sz_nagy",
+            target_subnormalized_state=coeffs,
+            exact_density_matrix=rho_exact,
+            success_probability=float(result.p_success),
+            normalized_success_state=result.normalized_success_state,
+            recovered_density_matrix=recovered,
+            recovery_error_norm=err,
+            scale_factor=float(result.scale_factor),
+            backend_result=result,
+        )
+
+    # ------------------------------------------------------------------
+    # Unitary-only rescaled baseline
+    # ------------------------------------------------------------------
+    if method_key in {"unitary_rescaled", "unitary_only", "unitary-only", "unitary"}:
+        if trace_val <= tol:
+            raise ValueError("Cannot form the unitary-only baseline for a zero-trace target state.")
+        normalized_target = coeffs / np.sqrt(trace_val)
+        recovered = trace_val * density_matrix_from_state(normalized_target)
+        err = float(np.linalg.norm(recovered - rho_exact, ord="fro"))
+        return SubnormalizedPreparationMethodResult(
+            method="unitary_rescaled",
+            target_subnormalized_state=coeffs,
+            exact_density_matrix=rho_exact,
+            success_probability=float(unitary_baseline_success_value),
+            normalized_success_state=normalized_target,
+            recovered_density_matrix=recovered,
+            recovery_error_norm=err,
+            scale_factor=1.0,
+            backend_result=None,
+        )
+
+    raise ValueError(
+        "Unknown method. Expected one of "
+        "{'paper_svd', 'sz_nagy', 'unitary_rescaled'}."
+    )
+
+
+def compare_subnormalized_preparation_methods(
+    normalized_two_qubit_state: Sequence[complex],
+    *,
+    methods: Sequence[str] = ("paper_svd", "sz_nagy", "unitary_rescaled"),
+    auto_scale: bool = False,
+    tol: float = 1e-12,
+    unitary_baseline_success_value: float = 1.0,
+) -> dict[str, SubnormalizedPreparationMethodResult]:
+    """
+    Compare several preparation methods on the same paper-style target state.
+    """
+    sample = build_subnormalized_state_sample(
+        normalized_two_qubit_state,
+        simulate_dilation=False,
+        auto_scale=auto_scale,
+        tol=tol,
+    )
+    psi_target = sample.target_subnormalized_state
+
+    out: dict[str, SubnormalizedPreparationMethodResult] = {}
+    for method in methods:
+        result = prepare_subnormalized_state_via_method(
+            psi_target,
+            method=method,
+            auto_scale=auto_scale,
+            tol=tol,
+            unitary_baseline_success_value=unitary_baseline_success_value,
+        )
+        out[result.method] = result
+    return out

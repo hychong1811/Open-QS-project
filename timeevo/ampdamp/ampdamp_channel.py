@@ -7,6 +7,7 @@ from typing import Optional, Sequence, Union
 import numpy as np
 
 from algo.dilation_algo import build_diagonal_dilation, hadamard
+from algo.sz_nagy_dilation import build_sz_nagy_dilation, apply_sz_nagy_dilation_to_state
 from noise.noise_simulation import (
     SimpleNISQNoiseParameters,
     apply_default_noise_for_one_ancilla_step,
@@ -80,6 +81,21 @@ class AmpDampTrajectoryResult:
     def obtained_populations(self) -> np.ndarray:
         return np.real(np.stack([self.obtained_density_matrices[:, 0, 0], self.obtained_density_matrices[:, 1, 1]], axis=1))
 
+@dataclass(frozen=True)
+class AmpDampMethodBranchSimulationResult:
+    method: str
+    label: str
+    time: float
+    component_label: str
+    component_weight: float
+    exact_subdensity: np.ndarray
+    obtained_subdensity: np.ndarray
+    success_probability_raw: float
+    success_probability_exact: float
+    conditional_state_exact: np.ndarray
+    conditional_state_for_tomography: np.ndarray
+    tomography_result: Optional[SingleQubitTomographyResult]
+    full_two_qubit_output_density: Optional[np.ndarray]
 
 def ket0() -> np.ndarray:
     return np.array([1.0, 0.0], dtype=complex)
@@ -322,6 +338,207 @@ def simulate_ampdamp_branch_on_pure_component(
         conditional_state_for_tomography=np.asarray(conditional_for_tomography, dtype=complex),
         tomography_result=tomo,
         full_two_qubit_output_density=np.asarray(full_output, dtype=complex),
+    )
+
+def simulate_ampdamp_branch_on_pure_component_via_method(
+    time: float,
+    *,
+    method: str = "paper_svd",
+    component_weight: float,
+    component_ket: ArrayLike,
+    component_label: str,
+    branch: int,
+    gamma: float = 0.15,
+    noise_params: Optional[SimpleNISQNoiseParameters] = None,
+    shots: Optional[int] = None,
+    shots_ancilla: Optional[int] = None,
+    seed: Optional[int] = None,
+    enforce_physical: bool = True,
+) -> AmpDampMethodBranchSimulationResult:
+    """
+    Simulate one amplitude-damping Kraus branch acting on one pure-state
+    component using either:
+
+    - "paper_svd"
+    - "sz_nagy"
+
+    The returned `exact_subdensity` and `obtained_subdensity` already include
+    the classical component weight.
+    """
+    psi = np.asarray(component_ket, dtype=complex).reshape(2)
+    rho0 = density_matrix_from_ket(psi)
+
+    k0, k1 = amplitude_damping_kraus_operators(time, gamma=gamma)
+    kraus = k0 if branch == 0 else k1
+
+    exact_subdensity_unweighted = kraus @ rho0 @ kraus.conj().T
+    exact_subdensity = float(component_weight) * exact_subdensity_unweighted
+
+    if shots_ancilla is None:
+        shots_ancilla = shots
+
+    method_key = str(method).strip().lower()
+
+    # ------------------------------------------------------------
+    # Paper SVD dilation
+    # ------------------------------------------------------------
+    if method_key in {"paper_svd", "paper", "svd"}:
+        analytic = analytic_svd_for_amplitude_damping(
+            time,
+            branch=branch,
+            gamma=gamma,
+        )
+
+        input_full_ket = np.kron(np.array([1.0, 0.0], dtype=complex), psi)
+        input_full_rho = density_matrix_from_ket(input_full_ket)
+        full_output = analytic.full_unitary @ input_full_rho @ analytic.full_unitary.conj().T
+
+        if noise_params is not None:
+            full_output = apply_default_noise_for_one_ancilla_step(full_output, noise_params)
+
+        success_block = ancilla_zero_block(full_output)
+        p_success_exact = float(np.real(np.trace(success_block)))
+
+        if p_success_exact > 1e-14:
+            conditional_for_tomography = _hermitize(success_block / p_success_exact)
+        else:
+            conditional_for_tomography = np.eye(2, dtype=complex) / 2.0
+
+        if noise_params is None:
+            p_success_raw = p_success_exact
+            tomo = perform_single_qubit_tomography(
+                conditional_for_tomography,
+                shots=shots,
+                seed=seed,
+                enforce_physical=enforce_physical,
+            )
+        else:
+            ancilla_meas = noisy_single_qubit_measurement(
+                [p_success_exact, 1.0 - p_success_exact],
+                p0_to_1=noise_params.readout_p0_to_1_ancilla,
+                p1_to_0=noise_params.readout_p1_to_0_ancilla,
+                shots=shots_ancilla,
+                rng=np.random.default_rng(seed),
+            )
+            if shots_ancilla is None:
+                p_success_raw = float(ancilla_meas.observed_probabilities[0])
+            else:
+                total = ancilla_meas.counts["0"] + ancilla_meas.counts["1"]
+                p_success_raw = 0.0 if total == 0 else ancilla_meas.counts["0"] / total
+
+            tomo = perform_single_qubit_tomography_with_optional_readout(
+                conditional_for_tomography,
+                trace_scale=1.0,
+                shots=shots,
+                seed=seed,
+                readout_p0_to_1=noise_params.readout_p0_to_1_system,
+                readout_p1_to_0=noise_params.readout_p1_to_0_system,
+                enforce_physical=enforce_physical,
+            )
+
+        obtained_subdensity = float(component_weight) * p_success_raw * tomo.physical_density_matrix
+        conditional_exact = (
+            exact_subdensity_unweighted / np.trace(exact_subdensity_unweighted)
+            if np.real(np.trace(exact_subdensity_unweighted)) > 1e-14
+            else np.eye(2, dtype=complex) / 2.0
+        )
+
+        return AmpDampMethodBranchSimulationResult(
+            method="paper_svd",
+            label=analytic.label,
+            time=float(time),
+            component_label=str(component_label),
+            component_weight=float(component_weight),
+            exact_subdensity=np.asarray(exact_subdensity, dtype=complex),
+            obtained_subdensity=np.asarray(obtained_subdensity, dtype=complex),
+            success_probability_raw=float(p_success_raw),
+            success_probability_exact=float(p_success_exact),
+            conditional_state_exact=np.asarray(conditional_exact, dtype=complex),
+            conditional_state_for_tomography=np.asarray(conditional_for_tomography, dtype=complex),
+            tomography_result=tomo,
+            full_two_qubit_output_density=np.asarray(full_output, dtype=complex),
+        )
+
+    # ------------------------------------------------------------
+    # Direct Sz.-Nagy dilation
+    # ------------------------------------------------------------
+    if method_key in {"sz_nagy", "sz-nagy", "sznagy"}:
+        dilation = build_sz_nagy_dilation(
+            kraus,
+            auto_scale=False,
+        )
+        state_result = apply_sz_nagy_dilation_to_state(dilation, psi)
+        full_output = density_matrix_from_ket(state_result.ancilla_system_output)
+
+        if noise_params is not None:
+            full_output = apply_default_noise_for_one_ancilla_step(full_output, noise_params)
+
+        success_block = ancilla_zero_block(full_output)
+        p_success_exact = float(np.real(np.trace(success_block)))
+
+        if p_success_exact > 1e-14:
+            conditional_for_tomography = _hermitize(success_block / p_success_exact)
+        else:
+            conditional_for_tomography = np.eye(2, dtype=complex) / 2.0
+
+        if noise_params is None:
+            p_success_raw = p_success_exact
+            tomo = perform_single_qubit_tomography(
+                conditional_for_tomography,
+                shots=shots,
+                seed=seed,
+                enforce_physical=enforce_physical,
+            )
+        else:
+            ancilla_meas = noisy_single_qubit_measurement(
+                [p_success_exact, 1.0 - p_success_exact],
+                p0_to_1=noise_params.readout_p0_to_1_ancilla,
+                p1_to_0=noise_params.readout_p1_to_0_ancilla,
+                shots=shots_ancilla,
+                rng=np.random.default_rng(seed),
+            )
+            if shots_ancilla is None:
+                p_success_raw = float(ancilla_meas.observed_probabilities[0])
+            else:
+                total = ancilla_meas.counts["0"] + ancilla_meas.counts["1"]
+                p_success_raw = 0.0 if total == 0 else ancilla_meas.counts["0"] / total
+
+            tomo = perform_single_qubit_tomography_with_optional_readout(
+                conditional_for_tomography,
+                trace_scale=1.0,
+                shots=shots,
+                seed=seed,
+                readout_p0_to_1=noise_params.readout_p0_to_1_system,
+                readout_p1_to_0=noise_params.readout_p1_to_0_system,
+                enforce_physical=enforce_physical,
+            )
+
+        obtained_subdensity = float(component_weight) * p_success_raw * tomo.physical_density_matrix
+        conditional_exact = (
+            exact_subdensity_unweighted / np.trace(exact_subdensity_unweighted)
+            if np.real(np.trace(exact_subdensity_unweighted)) > 1e-14
+            else np.eye(2, dtype=complex) / 2.0
+        )
+
+        return AmpDampMethodBranchSimulationResult(
+            method="sz_nagy",
+            label=f"SzNagy_K{branch}",
+            time=float(time),
+            component_label=str(component_label),
+            component_weight=float(component_weight),
+            exact_subdensity=np.asarray(exact_subdensity, dtype=complex),
+            obtained_subdensity=np.asarray(obtained_subdensity, dtype=complex),
+            success_probability_raw=float(p_success_raw),
+            success_probability_exact=float(p_success_exact),
+            conditional_state_exact=np.asarray(conditional_exact, dtype=complex),
+            conditional_state_for_tomography=np.asarray(conditional_for_tomography, dtype=complex),
+            tomography_result=tomo,
+            full_two_qubit_output_density=np.asarray(full_output, dtype=complex),
+        )
+
+    raise ValueError(
+        "Unknown method. Expected one of "
+        "{'paper_svd', 'sz_nagy'}."
     )
 
 
